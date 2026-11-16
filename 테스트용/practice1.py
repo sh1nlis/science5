@@ -1,14 +1,16 @@
 """
-지표 1. 탑티어 논문 비중 및 건수
+지표 1. 탑티어 논문 비중 및 건수 (전 분야 확장 하이브리드 버전)
 
 수식 (2021~2025)
 - 전체 논문 수 = 정식 게재 논문 수 (프리프린트 제외)
 - 탑티어 비중(%) = 탑티어 논문 수 / 전체 논문 수 * 100
 - 연평균 탑티어 = 탑티어 논문 수 / 활동 연수 (기간 중 첫 논문 연도부터)
 
-등급 규칙 (공개 등급표 기준)
-- 학회: ICORE/CORE 등급  A* = 탑티어, A = 중위권, 그 외 = 기타
-- 저널: CCF 추천 목록    A = 탑티어,  B = 중위권, 그 외 = 기타
+하이브리드 등급 판별 규칙 (전 학문 분야 대응)
+1. [CS/AI 특화] 공개 등급표(CORE A*, CCF A) 매칭 시 우선 적용
+2. [전 분야 공통 ①] OpenAlex 분야 보정 피인용 백분위 상위 10% 이내(>= 0.90) 또는 FWCI >= 2.0 -> 탑티어
+   (상위 25% 이내(>= 0.75) 또는 FWCI >= 1.2 -> 중위권)
+3. [전 분야 공통 ②] 게재 저널/학회 임팩트(2yr_mean_citedness) >= 5.0 -> 탑티어 (2.0 이상 -> 중위권)
 - 워크숍·Findings·프리프린트는 탑티어로 보지 않음
 """
 
@@ -23,8 +25,7 @@ import streamlit as st
 MOCK_PATH = Path(__file__).with_name("mock-up-data-toptier-demo.json")
 START, END = 2021, 2025
 
-# 등급표: 학회·저널을 추가하거나 등급을 바꿀 때 여기만 고치면 됨
-# ("^...$"는 게재처 이름이 정확히 같을 때만 인정)
+# 등급표: CS/AI 핵심 학회·저널 우선 매칭용
 TIER_TABLE = {
     # 학회 · CORE A* -> 탑티어
     "CVPR": (1, ["CVPR", "Computer Vision and Pattern Recognition"]),
@@ -61,6 +62,14 @@ TIER_TABLE = {
 }
 TIER_LABEL = {1: "탑티어", 2: "중위권", 3: "기타"}
 
+# 임계값 설정 (타 전공 확장 시 기준치)
+TOP_PERCENTILE_THRESHOLD = 0.90   # 분야 내 상위 10%
+MID_PERCENTILE_THRESHOLD = 0.75   # 분야 내 상위 25%
+TOP_FWCI_THRESHOLD = 2.0          # 세계 평균 대비 2배 이상 피인용
+MID_FWCI_THRESHOLD = 1.2          # 세계 평균 대비 1.2배 이상 피인용
+TOP_IMPACT_THRESHOLD = 5.0        # 저널 2년 평균 피인용(IF 유사) 5.0 이상
+MID_IMPACT_THRESHOLD = 2.0        # 저널 2년 평균 피인용(IF 유사) 2.0 이상
+
 # 연구실 색 (A, B) / 연한 색
 COLOR = ("#3D5A80", "#5E8C83")
 LIGHT = ("#E3E8EF", "#E2ECEA")
@@ -72,15 +81,75 @@ _ALIASES = sorted(((a, k, t) for k, (t, al) in TIER_TABLE.items() for a in al),
                   key=lambda x: len(x[0]), reverse=True)
 
 
-def classify_venue(venue):
-    if not venue or _NOT_MAIN.search(venue):
-        return 3, venue or "(게재처 없음)"
+def _extract_metrics(paper):
+    """OpenAlex 원시 데이터 또는 정제된 딕셔너리에서 백분위, FWCI, 저널 임팩트를 안전하게 추출"""
+    # 1. 분야 보정 백분위 추출 (OpenAlex API 구조 및 커스텀 키 모두 대응)
+    pct_obj = paper.get("citation_normalized_percentile")
+    if isinstance(pct_obj, dict):
+        percentile = pct_obj.get("value")
+    else:
+        percentile = pct_obj if isinstance(pct_obj, (int, float)) else paper.get("percentile")
+
+    # 2. FWCI 추출
+    fwci = paper.get("fwci")
+
+    # 3. 게재처(Source) 2년 평균 피인용 지수 추출
+    impact = paper.get("2yr_mean_citedness") or paper.get("source_impact")
+    if impact is None:
+        loc = paper.get("primary_location") or {}
+        src = loc.get("source") or {}
+        summary = src.get("summary_stats") or {}
+        impact = summary.get("2yr_mean_citedness")
+
+    return percentile, fwci, impact
+
+
+def classify_paper(paper):
+    """
+    논문 1편의 등급(1: 탑티어, 2: 중위권, 3: 기타), 정규화된 게재처명, 판별 근거를 반환
+    """
+    venue = paper.get("venue")
+    if not venue:
+        loc = paper.get("primary_location") or {}
+        src = loc.get("source") or {}
+        venue = src.get("display_name")
+
+    clean_venue = venue.strip() if venue else "(게재처 없음)"
+
+    # 워크숍·Findings 등은 무조건 기타(3) 처리
+    if not venue or _NOT_MAIN.search(clean_venue):
+        return 3, clean_venue, "제외 대상(워크숍 등)"
+
+    # [1단계] CS/AI 학회·저널 등급표 매칭
     for alias, key, tier in _ALIASES:
         pattern = (rf"{alias}" if alias.startswith("^")
                    else rf"(?<![A-Za-z]){re.escape(alias)}(?![A-Za-z])")
-        if re.search(pattern, venue.strip(), re.IGNORECASE):
-            return tier, key
-    return 3, venue
+        if re.search(pattern, clean_venue, re.IGNORECASE):
+            return tier, key, "학회/저널 등급표"
+
+    # [2단계] OpenAlex 분야 보정 백분위 & FWCI 기준 (전 분야 공통)
+    percentile, fwci, impact = _extract_metrics(paper)
+
+    if percentile is not None:
+        if percentile >= TOP_PERCENTILE_THRESHOLD:
+            return 1, clean_venue, f"분야 상위 {(1 - percentile) * 100:.1f}%"
+        elif percentile >= MID_PERCENTILE_THRESHOLD:
+            return 2, clean_venue, f"분야 상위 {(1 - percentile) * 100:.1f}%"
+
+    if fwci is not None:
+        if fwci >= TOP_FWCI_THRESHOLD:
+            return 1, clean_venue, f"FWCI {fwci:.2f}"
+        elif fwci >= MID_FWCI_THRESHOLD:
+            return 2, clean_venue, f"FWCI {fwci:.2f}"
+
+    # [3단계] 게재 저널/학회 자체 임팩트(2yr_mean_citedness) 기준 (신생 논문 보완)
+    if impact is not None:
+        if impact >= TOP_IMPACT_THRESHOLD:
+            return 1, clean_venue, f"저널 임팩트 {impact:.1f}"
+        elif impact >= MID_IMPACT_THRESHOLD:
+            return 2, clean_venue, f"저널 임팩트 {impact:.1f}"
+
+    return 3, clean_venue, "일반 게재"
 
 
 def compute_toptier(lab, start=START, end=END):
@@ -96,15 +165,24 @@ def compute_toptier(lab, start=START, end=END):
 
     rows = []
     for p in papers:
-        y = p.get("year")
+        y = p.get("year") or p.get("publication_year")
         if y is None or not start <= int(y) <= end:
             continue
         if (p.get("type") or "").lower() in _EXCLUDED_TYPES or p.get("venue_type") == "repository":
             continue
-        tier, key = classify_venue(p.get("venue"))
-        rows.append({"year": int(y), "title": p.get("title", ""), "venue": key,
-                     "tier": tier, "등급": TIER_LABEL[tier], "url": p.get("url")})
-    df = pd.DataFrame(rows, columns=["year", "title", "venue", "tier", "등급", "url"])
+
+        tier, key, basis = classify_paper(p)
+        rows.append({
+            "year": int(y),
+            "title": p.get("title", ""),
+            "venue": key,
+            "tier": tier,
+            "등급": TIER_LABEL[tier],
+            "판별기준": basis,
+            "url": p.get("url") or p.get("id")
+        })
+
+    df = pd.DataFrame(rows, columns=["year", "title", "venue", "tier", "등급", "판별기준", "url"])
     count = df["tier"].value_counts()
     active = end - max(int(df["year"].min()), start) + 1 if len(df) else 0
     return {**base, "has_papers": True, "n_all": len(df), "n_top": int(count.get(1, 0)),
@@ -277,7 +355,7 @@ def _paper_table(ra, rb):
     df = df[df["등급"].isin(tiers)].sort_values(["year", "venue"], ascending=[False, True])
     st.caption(f"{len(df)}편")
     st.dataframe(
-        df[["연구실", "year", "등급", "venue", "title", "url"]].rename(
+        df[["연구실", "year", "등급", "판별기준", "venue", "title", "url"]].rename(
             columns={"year": "연도", "venue": "학회/저널", "title": "제목", "url": "링크"}),
         hide_index=True, use_container_width=True,
         column_config={"링크": st.column_config.LinkColumn("링크", display_text="원문"),
@@ -299,7 +377,7 @@ def render_toptier(lab_a, lab_b):
 
     st.write("")
     if ra["has_papers"] and rb["has_papers"]:
-        t1, t2, t3 = st.tabs(["연도별 추이", "학회별 비교", "논문 목록"])
+        t1, t2, t3 = st.tabs(["연도별 추이", "학회/저널별 비교", "논문 목록"])
         with t1:
             st.caption("진한 막대 = 탑티어 · 연한 막대 = 전체 논문")
             st.altair_chart(_yearly_chart(ra, rb), use_container_width=True)
@@ -308,7 +386,7 @@ def render_toptier(lab_a, lab_b):
             if chart is None:
                 st.caption("탑티어 논문이 없어요.")
             else:
-                st.caption("탑티어 학회별 논문 수 (왼쪽 A · 오른쪽 B)")
+                st.caption("탑티어 학회/저널별 논문 수 (왼쪽 A · 오른쪽 B)")
                 st.altair_chart(chart, use_container_width=True)
         with t3:
             _paper_table(ra, rb)

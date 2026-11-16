@@ -59,11 +59,23 @@ def fetch_openalex_lab_data_by_id(author_id, author_name):
         concepts = [c["display_name"] for c in w.get("concepts", []) if c.get("level", 1) == 0]
         lab_dict["interdisciplinarity_demo_papers"].append({"id": w["id"], "title": w.get("title", ""), "year": year, "field_ids": concepts})
 
-        # 💡 지표 1번 용 (탑티어 판별을 위한 게재처 데이터 추출 추가)
-        venue_name = w.get("primary_location", {}).get("source", {})
-        venue_name = venue_name.get("display_name", "") if venue_name else ""
+        # 💡 지표 1번 용 (탑티어 판별을 위한 게재처 및 전 분야 확장 지표 추출)
+        loc = w.get("primary_location") or {}
+        src = loc.get("source") or {}
+        venue_name = src.get("display_name", "")
+        venue_type = src.get("type", "")
+        source_impact = (src.get("summary_stats") or {}).get("2yr_mean_citedness")
+
         lab_dict["toptier_papers"].append({
-            "title": w.get("title", ""), "year": year, "venue": venue_name, "type": w.get("type", ""), "url": w.get("id", "")
+            "title": w.get("title", ""),
+            "year": year,
+            "venue": venue_name,
+            "venue_type": venue_type,
+            "type": w.get("type", ""),
+            "url": w.get("id", ""),
+            "fwci": w.get("fwci"),
+            "citation_normalized_percentile": w.get("citation_normalized_percentile"),
+            "2yr_mean_citedness": source_impact,
         })
 
         # 지표 2번 용
