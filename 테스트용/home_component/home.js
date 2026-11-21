@@ -134,7 +134,7 @@ export default function (component) {
   function cardHTML(p, slot) {
     if (!p) return `<div class="qm">?</div><p><b>${slot}</b> 칸이 비어 있어요<br>아래에서 교수님을 담아 주세요</p>`;
     const s1 = p.works != null ? `<div class="st"><small>${esc(p.works_label || '논문')}</small><b>${p.works}</b></div>` : `<div class="st"><small>단과대</small><b style="font-size:12.5px">${esc(p.col || '-')}</b></div>`;
-    const s2 = `<div class="st"><small>${p.field ? '주 분야' : '학과'}</small><b style="font-size:12.5px">${esc(p.field || p.dept || '-')}</b></div>`;
+    const s2 = p.field || p.dept ? `<div class="st"><small>${p.field ? '주 분야' : '학과'}</small><b style="font-size:12.5px">${esc(p.field || p.dept)}</b></div>` : '';
     return `<div class="sheen"></div><button class="rm" type="button" data-rm="${slot}">빼기</button>
       <div class="slot">LAB ${slot}</div><div class="mono">${esc((p.name || '?')[0])}</div>
       <div class="pn">${esc(p.name)}</div><div class="pe">${esc(p.eng || '')}</div><div class="pa">${esc(p.aff || '')}</div>
